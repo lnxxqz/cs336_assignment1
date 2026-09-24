@@ -9,9 +9,11 @@ class softmax(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
-    def forward(x:Float[Tensor, " ..."]):
-        ex = x.exp()
-        return ex / sum(ex)
+    def forward(self,x:Float[Tensor, " ..."]):
+        mx = x.amax(dim=self.dim, keepdim=True)
+        x = (x-mx).exp()
+        return x / x.sum(dim=self.dim, keepdim=True)
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
     sf = softmax(dim)
+    return sf(in_features)
