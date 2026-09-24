@@ -10,6 +10,15 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 
+import cs336_basics.train_bpe
+import cs336_basics.tokenizer
+import cs336_basics.linear
+import cs336_basics.embedding
+import cs336_basics.rmsnorm
+import cs336_basics.swiglu
+import cs336_basics.rope
+import cs336_basics.softmax
+
 def run_linear(
     d_in: int,
     d_out: int,
@@ -28,7 +37,7 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-
+    return cs336_basics.linear.run_linear(d_in,d_out,weights,in_features)
     raise NotImplementedError
 
 
@@ -50,7 +59,7 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-
+    return cs336_basics.embedding.run_embedding(vocab_size,d_model, weights, token_ids)
     raise NotImplementedError
 
 
@@ -83,6 +92,7 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
+    return cs336_basics.swiglu.run_swiglu(d_model, d_ff, w1_weight, w2_weight, w3_weight, in_features)
     raise NotImplementedError
 
 
@@ -200,6 +210,7 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
+    return cs336_basics.rope.run_rope(d_k,theta,max_seq_len,in_query_or_key,token_positions)
     raise NotImplementedError
 
 
@@ -378,6 +389,7 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
+    return cs336_basics.rmsnorm.run_rmsnorm(d_model,eps,weights,in_features)
     raise NotImplementedError
 
 
@@ -431,6 +443,7 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
+    return cs336_basics.softmax.run_softmax(in_features, dim)
     raise NotImplementedError
 
 
@@ -559,6 +572,7 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
+    return cs336_basics.tokenizer.get_tokenizer(vocab, merges, special_tokens)
     raise NotImplementedError
 
 
@@ -589,4 +603,5 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
+    return cs336_basics.train_bpe.run_train_bpe(input_path, vocab_size, special_tokens,)
     raise NotImplementedError
