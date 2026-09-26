@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 *.egg-info/
 *.zip
+*.gz
 
 # local data and tokenizer artifacts
 *.txt
