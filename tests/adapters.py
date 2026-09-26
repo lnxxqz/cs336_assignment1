@@ -21,6 +21,8 @@ import cs336_basics.softmax
 import cs336_basics.scaled_dot_product_attention
 import cs336_basics.multihead_self_attention
 import cs336_basics.multihead_self_attention_with_rope
+import cs336_basics.transformer_block
+import cs336_basics.transformer_lm
 
 def run_linear(
     d_in: int,
@@ -307,6 +309,13 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
+    return cs336_basics.transformer_block.run_transformer_block(d_model,
+        num_heads,
+        d_ff,
+        max_seq_len,
+        theta,
+        weights,
+        in_features)
     raise NotImplementedError
 
 
@@ -389,6 +398,17 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
+    return cs336_basics.transformer_lm.run_transformer_lm(
+    vocab_size,
+    context_length,
+    d_model,
+    num_layers,
+    num_heads,
+    d_ff,
+    rope_theta,
+    weights,
+    in_indices,
+)
     raise NotImplementedError
 
 
