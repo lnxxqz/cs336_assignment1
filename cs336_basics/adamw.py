@@ -32,7 +32,5 @@ class adamw(torch.optim.Optimizer):
                 self.state[p]['m'] = m
                 self.state[p]['v'] = v
 
-
-
 def get_adamw_cls():
     return adamw
