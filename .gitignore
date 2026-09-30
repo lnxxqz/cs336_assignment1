@@ -12,3 +12,4 @@ __pycache__/
 *.txt
 *.pkl
 .vscode/
+train_model/

@@ -28,6 +28,8 @@ import cs336_basics.adamw
 import cs336_basics.get_lr_cosine_schedule
 import cs336_basics.gradient_clipping
 import cs336_basics.get_batch
+import cs336_basics.save_checkpoint
+import cs336_basics.load_checkpoint
 
 def run_linear(
     d_in: int,
@@ -581,6 +583,7 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
+    return cs336_basics.save_checkpoint.run_save_checkpoint(model, optimizer, iteration, out)
     raise NotImplementedError
 
 
@@ -602,6 +605,7 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
+    return cs336_basics.load_checkpoint.load_checkpoint(src, model, optimizer)
     raise NotImplementedError
 
 

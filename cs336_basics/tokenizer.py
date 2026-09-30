@@ -46,7 +46,11 @@ class tokenizer:
                     u = [mp[i.to_bytes()] for i in t]
                     ls.append(u)
 
+        LEN = len(self.merges)
+        cnt = 0
         for merge in self.merges:
+            cnt+=1
+            print(f'merge: {cnt}/{LEN}')
             L = len(ls)
             id = mp[merge[0]+merge[1]]
             for j in range(L):
