@@ -88,7 +88,7 @@ def run_train_bpe(
                                 
     lst = []
     while cnt < vocab_size:
-        print(cnt)
+        # print(cnt)
         if not pair_cnt:break
         merge = max(pair_cnt ,key=pair_cnt.get)
         # print(merge)

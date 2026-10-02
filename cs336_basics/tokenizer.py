@@ -1,15 +1,48 @@
-import os
-import regex as re
-from collections import defaultdict
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 import pickle
+import heapq
+import regex as re
+
+PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
 
 class tokenizer:
-    def __init__(self, vocab, merges, special_tokens):
+    def __init__(self, vocab, merges, special_tokens=None):
+        # vocab: id -> bytes
         self.vocab = vocab
         self.merges = merges
-        self.special_tokens = special_tokens
-        
+        self.special_tokens = special_tokens or []
+
+        # 预计算：bytes -> id
+        self.bytes_to_id = {b: i for i, b in vocab.items()}
+
+        # 预计算：单字节 id 表，用于快速把 UTF-8 bytes 转成初始 id
+        self.byte_to_id = [self.bytes_to_id[bytes([i])] for i in range(256)]
+
+        # 预计算特殊 token 的 id
+        self.special_token_to_id = {
+            tok: self.bytes_to_id[tok.encode("utf-8")]
+            for tok in self.special_tokens
+        }
+
+        # 特殊 token 分割正则，长 token 优先
+        if self.special_tokens:
+            sorted_special = sorted(self.special_tokens, key=len, reverse=True)
+            pattern = "(" + "|".join(re.escape(t) for t in sorted_special) + ")"
+            self.special_split_re = re.compile(pattern)
+        else:
+            self.special_split_re = None
+
+        # 预编译 PAT
+        self.pat = re.compile(PAT)
+
+        # 预计算 merge: (left_id, right_id) -> (rank, new_id)
+        self.merge_ranks = {}
+        for rank, (a, b) in enumerate(merges):
+            a_id = self.bytes_to_id[a]
+            b_id = self.bytes_to_id[b]
+            new_id = self.bytes_to_id[a + b]
+            self.merge_ranks[(a_id, b_id)] = (rank, new_id)
+
     @classmethod
     def from_files(cls, vocab_filepath, merges_filepath, special_tokens=None):
         with open(vocab_filepath, "rb") as f:
@@ -18,67 +51,94 @@ class tokenizer:
             merges = pickle.load(f)
         return cls(vocab, merges, special_tokens)
 
-    def encode(self, text)-> list[int]:
-        mp = {}
-        for b,id in self.vocab.items():
-            mp[id] = b
+    def _apply_merges(self, ids):
+        """对单个 PAT 片段做 BPE 合并，按 merge rank 从小到大合并。"""
+        n = len(ids)
+        if n < 2:
+            return ids
 
-        special_tokens_dic = {}
+        # 双向链表 + 最小堆
+        prev = list(range(-1, n - 1))
+        nxt = list(range(1, n + 1))
+        nxt[n - 1] = -1
+        alive = [True] * n
+        heap = []
 
-        for i in self.special_tokens or []:
-            u = i.encode('utf-8')
-            special_tokens_dic[u] = mp[u]
+        for i in range(n - 1):
+            info = self.merge_ranks.get((ids[i], ids[i + 1]))
+            if info is not None:
+                rank, new_id = info
+                heapq.heappush(heap, (rank, i, ids[i], ids[i + 1], new_id))
 
-        tokens = self.special_tokens or []
-        tokens = sorted(tokens, key=len, reverse=True)
-        pattern = "(" + "|".join(re.escape(t) for t in tokens) + ")"
-        if self.special_tokens is None or self.special_tokens is []:
-            chunks = [text]
-        else :chunks = re.split(pattern, text)
+        while heap:
+            rank, i, left_id, right_id, new_id = heapq.heappop(heap)
 
-        ls = []
+            if not alive[i]:
+                continue
+
+            j = nxt[i]
+            if j == -1 or not alive[j]:
+                continue
+            if ids[i] != left_id or ids[j] != right_id:
+                continue
+
+            # 合并 i 和 j
+            ids[i] = new_id
+            alive[j] = False
+
+            nj = nxt[j]
+            nxt[i] = nj
+            if nj != -1:
+                prev[nj] = i
+
+            # 新产生的相邻 pair 入堆
+            pi = prev[i]
+            if pi != -1:
+                info = self.merge_ranks.get((ids[pi], ids[i]))
+                if info is not None:
+                    heapq.heappush(heap, (info[0], pi, ids[pi], ids[i], info[1]))
+
+            if nj != -1:
+                info = self.merge_ranks.get((ids[i], ids[nj]))
+                if info is not None:
+                    heapq.heappush(heap, (info[0], i, ids[i], ids[nj], info[1]))
+
+        # 收集链表结果
+        result = []
+        i = 0
+        while i != -1:
+            result.append(ids[i])
+            i = nxt[i]
+        return result
+
+    def encode(self, text) -> list[int]:
+        out = []
+
+        chunks = self.special_split_re.split(text) if self.special_split_re else [text]
+
         for chunk in chunks:
-            if special_tokens_dic.get(chunk.encode('utf-8'),None) is not None:
-                ls.append([special_tokens_dic[chunk.encode('utf-8')]])
-            else:
-                for m in re.finditer(PAT,chunk):
-                    t = m.group().encode("utf-8")
-                    u = [mp[i.to_bytes()] for i in t]
-                    ls.append(u)
+            if not chunk:
+                continue
 
-        LEN = len(self.merges)
-        cnt = 0
-        for merge in self.merges:
-            cnt+=1
-            print(f'merge: {cnt}/{LEN}')
-            L = len(ls)
-            id = mp[merge[0]+merge[1]]
-            for j in range(L):
-                i = 0
-                newls = []
-                le = len(ls[j])
-                while i < le:
-                    if i<le-1 and (self.vocab[ls[j][i]], self.vocab[ls[j][i+1]]) == merge:
-                        newls.append(id)
-                        i+=2
-                    else :
-                        newls.append(ls[j][i])
-                        i+=1
-                ls[j] = newls
-        lis = []
-        for i in ls:
-            for j in i:
-                lis.append(j)
-        return lis
+            # 特殊 token 直接输出 id
+            if chunk in self.special_token_to_id:
+                out.append(self.special_token_to_id[chunk])
+                continue
+
+            # 普通文本按 PAT 切分，再分别做 BPE
+            for m in self.pat.finditer(chunk):
+                bs = m.group().encode("utf-8")
+                ids = [self.byte_to_id[b] for b in bs]
+                out.extend(self._apply_merges(ids))
+
+        return out
 
     def encode_iterable(self, iterable):
         for piece in iterable:
             yield from self.encode(piece)
 
-    def decode(self, ids)-> str:
-        txt = b''.join([self.vocab[id] for id in ids])
-        return txt.decode('utf-8',errors='replace')
-        
+    def decode(self, ids) -> str:
+        return b"".join(self.vocab[i] for i in ids).decode("utf-8", errors="replace")
 
 
 def get_tokenizer(
