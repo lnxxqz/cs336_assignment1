@@ -53,7 +53,9 @@ max_norm       = 1.0
 
 epoch          = 100
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
+print(f'device: {device}')
 
 def bpe(datapath, rulepath):
     if os.path.exists(rulepath + "_vocab.pkl"):
@@ -65,6 +67,7 @@ def bpe(datapath, rulepath):
         pickle.dump(rule[1], f)
 
 def getdata(datapath, rulepath, tokenpath):
+    print('start getdata...')
     if not os.path.exists(tokenpath):
         tokeniz = tokenizer.tokenizer.from_files(
             rulepath + "_vocab.pkl",
@@ -77,10 +80,11 @@ def getdata(datapath, rulepath, tokenpath):
         arr = np.array(ids, dtype = np.uint16)
         np.save(tokenpath, arr)
     data = np.load(tokenpath, mmap_mode="r")
+    print('getdata ok')
     return data
 
-def getbatch(dataset, batch_size, context_length, device='cpu'):
-    return get_batch.get_batch(dataset, batch_size, context_length, 'cpu')
+def getbatch(dataset, batch_size, context_length, device):
+    return get_batch.get_batch(dataset, batch_size, context_length, device)
 def get_loss(model, x, label, loss):
     logits = model.forward(x)
     new_log = rearrange(logits, '... context_length vocab -> (... context_length) vocab')
@@ -90,7 +94,8 @@ def get_loss(model, x, label, loss):
 
 
 def train():
-    model = transformer_lm.transformer(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta)
+    model = transformer_lm.transformer(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta, device)
+    model.to(device)
     optimizer = adamw.adamw(model.parameters(), lr, weight_decay, betas, eps)
     print('start train')
     start_time = time.perf_counter()
@@ -100,7 +105,7 @@ def train():
         for group in optimizer.param_groups:
             group["lr"] = now_lr
         optimizer.zero_grad()
-        (x, y) = getbatch(dataset, batch_size, context_length, 'cpu')
+        (x, y) = getbatch(dataset, batch_size, context_length, device)
         entropy = get_loss(model, x, y, cross)
         entropy.backward()
         gradient_clipping.gradient_clipping(model.parameters(), max_norm)
@@ -108,7 +113,7 @@ def train():
         if (i+1)%10==0:
             save_checkpoint.save_checkpoint(model, optimizer, i, modelpath+str(i))
             with torch.no_grad():
-                (vx, vy) = getbatch(valid_dataset, batch_size, context_length, 'cpu')
+                (vx, vy) = getbatch(valid_dataset, batch_size, context_length, device)
                 valid_entropy = get_loss(model, vx, vy, cross)
             with open(logpath, "a", encoding="utf-8") as f:
                 f.write(f"step {i}\t loss{entropy.item()}\t valid_loss {valid_entropy.item()}\t time {time.perf_counter()-start_time}\n")
