@@ -22,7 +22,7 @@ import tokenizer
 import adamw
 import save_checkpoint
 
-datapath       = "D:/code/cs336/cs336_assignment1/TinyStoriesV2-GPT4-valid.txt"
+datapath       = "D:/code/cs336/cs336_assignment1/TinyStoriesV2-GPT4-train.txt"
 PATH           = "D:/code/cs336/cs336_assignment1/train_model/lr_1e-3/"
 
 valid_datapath = "D:/code/cs336/cs336_assignment1/TinyStoriesV2-GPT4-valid.txt"
