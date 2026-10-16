@@ -1,52 +1,48 @@
-import transformer_lm
-import decoding
-import tokenizer
+"""预测入口：uv run python -m cs336_basics.predict。"""
+
+import sys
+from pathlib import Path
+
 import torch
 
-datapath       = "D:/code/cs336/cs336_assignment1/TinyStoriesV2-GPT4-valid.txt"
-PATH           = "D:/code/cs336/cs336_assignment1/train_model/lr_1e-3/"
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-valid_datapath = "D:/code/cs336/cs336_assignment1/TinyStoriesV2-GPT4-valid.txt"
-valid_PATH     = PATH + "valid/"
-valid_tokenpath= valid_PATH + "tokens.npy"
+from cs336_basics.config import CONFIG, Config
+from cs336_basics.decoding import decoding
+from cs336_basics.tokenizer import tokenizer
+from cs336_basics.training_together import get_device
+from cs336_basics.transformer_lm import transformer
 
-rulepath       = PATH + "rule"
-tokenpath      = PATH + "tokens.npy"
-modelpath      = PATH + "model"
-rulepath       = PATH + "rule"
-tokenpath      = PATH + "tokens.npy"
-logpath        = PATH + "log.txt"
 
-vocab_size     = 10000
-special_tokens = ['<|endoftext|>']
-context_length   = 256
-d_model        = 512
-d_ff           = 1344
-num_layers     = 4
-num_heads      = 16
-rope_theta     = 10000
-lr             = 1e-3
-weight_decay   = 0.1
-betas          = (0.9, 0.95)
-eps            = 1e-8
-batch_size     = 50
-max_norm       = 1.0
+def load_model(config: Config = CONFIG):
+    device = get_device(config)
+    path = config.final_model_path if config.predict_checkpoint is None else config.path(config.predict_checkpoint)
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    # 新格式自动读取模型结构；旧 checkpoint 使用 config.py 中的模型结构。
+    model_config = checkpoint.get("model_config", config.model_kwargs())
+    model = transformer(**model_config).to(device)
+    model.load_state_dict(checkpoint.get("model", checkpoint))
+    model.eval()
+    return model, model_config["context_length"]
 
-epoch          = 100
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-tokeniz = tokenizer.tokenizer.from_files(
-            rulepath + "_vocab.pkl",
-            rulepath + "_merges.pkl",
-            special_tokens=special_tokens,
+def main(config: Config = CONFIG):
+    tokeniz = tokenizer.from_files(
+        config.path(config.vocab_path), config.path(config.merges_path),
+        special_tokens=list(config.special_tokens),
+    )
+    model, context_length = load_model(config)
+    prompt = input("请输入提示词：\n")
+    if not prompt:
+        raise ValueError("提示词不能为空")
+    with torch.inference_mode():
+        ids = decoding(
+            model, prompt, tokeniz, context_length, config.max_new_tokens,
+            tau=config.temperature, top_p=config.top_p,
         )
-model = transformer_lm.transformer(
-    vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta, device
-)
-obj = torch.load(modelpath + "99", map_location=device)
-model.load_state_dict(obj["model"])
-model = model.to(device)
+    print(tokeniz.decode(ids))
 
-ini = input()
-out = decoding.decoding(model, ini, tokeniz, context_length, 128)
-print(tokeniz.decode(out))
+
+if __name__ == "__main__":
+    main()

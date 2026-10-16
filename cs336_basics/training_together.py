@@ -1,127 +1,187 @@
-import numpy.typing as npt
-import torch.nn as nn
-import torch
-import numpy as np
-from jaxtyping import Bool, Float, Int
-from torch import Tensor
-import math
-from collections.abc import Iterable
-from einops import einsum, rearrange
-import os
-from typing import IO, Any, BinaryIO
+"""训练入口：uv run python -m cs336_basics.training_together。"""
+
+import json
 import pickle
+import random
+import sys
 import time
+from pathlib import Path
 
-import get_lr_cosine_schedule
-import get_batch
-import gradient_clipping
-import transformer_lm
-import cross_entropy
-import train_bpe
-import tokenizer
-import adamw
-import save_checkpoint
+import numpy as np
+import torch
 
-datapath       = "D:/code/cs336/cs336_assignment1/TinyStoriesV2-GPT4-valid.txt"
-PATH           = "D:/code/cs336/cs336_assignment1/train_model/lr_1e-3/"
+# 同时支持直接运行脚本和 python -m。
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-valid_datapath = "D:/code/cs336/cs336_assignment1/TinyStoriesV2-GPT4-valid.txt"
-valid_PATH     = PATH + "valid/"
-valid_tokenpath= valid_PATH + "tokens.npy"
+from cs336_basics.adamw import adamw
+from cs336_basics.config import CONFIG, Config
+from cs336_basics.cross_entropy import cross_entropy
+from cs336_basics.get_batch import get_batch
+from cs336_basics.get_lr_cosine_schedule import get_lr_cosine_schedule
+from cs336_basics.gradient_clipping import gradient_clipping
+from cs336_basics.tokenizer import tokenizer
+from cs336_basics.train_bpe import run_train_bpe
+from cs336_basics.transformer_lm import transformer
 
-rulepath       = PATH + "rule"
-tokenpath      = PATH + "tokens.npy"
-modelpath      = PATH + "model"
-rulepath       = PATH + "rule"
-tokenpath      = PATH + "tokens.npy"
-logpath        = PATH + "log.txt"
 
-vocab_size     = 10000
-special_tokens = ['<|endoftext|>']
-context_length   = 256
-d_model        = 512
-d_ff           = 1344
-num_layers     = 4
-num_heads      = 16
-rope_theta     = 10000
-lr             = 1e-3
-weight_decay   = 0.1
-betas          = (0.9, 0.95)
-eps            = 1e-8
-batch_size     = 50
-max_norm       = 1.0
+def get_device(config: Config) -> str:
+    if config.device == "auto":
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    return config.device
 
-epoch          = 100
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+def validate_config(config: Config) -> None:
+    if config.init_mode not in {"scratch", "resume", "weights"}:
+        raise ValueError("init_mode 必须是 scratch、resume 或 weights")
+    if config.init_mode != "scratch" and config.init_checkpoint is None:
+        raise ValueError("加载模型时必须填写 init_checkpoint")
+    for name in ("total_steps", "batch_size", "save_every", "eval_every", "eval_batches", "log_every"):
+        if getattr(config, name) <= 0:
+            raise ValueError(f"{name} 必须大于 0")
+    if not 0 <= config.warmup_steps < config.total_steps:
+        raise ValueError("warmup_steps 必须满足 0 <= warmup_steps < total_steps")
+    if config.num_heads <= 0 or config.d_model % config.num_heads or (config.d_model // config.num_heads) % 2:
+        raise ValueError("d_model 必须能被 num_heads 整除，并且每个 head 的维度必须是偶数")
 
-print(f'device: {device}')
 
-def bpe(datapath, rulepath):
-    if os.path.exists(rulepath + "_vocab.pkl"):
-        return
-    rule = train_bpe.run_train_bpe(datapath, vocab_size, special_tokens)
-    with open(rulepath + "_vocab.pkl", "wb") as f:
-        pickle.dump(rule[0], f)
-    with open(rulepath + "_merges.pkl", "wb") as f:
-        pickle.dump(rule[1], f)
+def initialize_training(config: Config, device: str):
+    """兼容旧 checkpoint 的 model/optimizer/iteration 格式。"""
+    model = transformer(**config.model_kwargs()).to(device)
+    optimizer = adamw(
+        model.parameters(), config.learning_rate, config.weight_decay,
+        config.betas, config.eps,
+    )
+    start_step = 0
+    if config.init_mode != "scratch":
+        checkpoint_path = config.path(config.init_checkpoint)
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+        saved_model_config = checkpoint.get("model_config")
+        if saved_model_config is not None and saved_model_config != config.model_kwargs():
+            raise ValueError("配置中的模型结构与 checkpoint 不一致，请检查 config.py 的模型参数")
+        model.load_state_dict(checkpoint.get("model", checkpoint))
+        if config.init_mode == "resume":
+            if "optimizer" not in checkpoint or "iteration" not in checkpoint:
+                raise ValueError("resume 需要包含 optimizer 和 iteration 的 checkpoint；纯权重请使用 weights")
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            start_step = checkpoint["iteration"] + 1
+        print(f"loaded {config.init_mode}: {checkpoint_path}")
+    return model, optimizer, start_step
 
-def getdata(datapath, rulepath, tokenpath):
-    print('start getdata...')
-    if not os.path.exists(tokenpath):
-        tokeniz = tokenizer.tokenizer.from_files(
-            rulepath + "_vocab.pkl",
-            rulepath + "_merges.pkl",
-            special_tokens=special_tokens,
+
+def prepare_tokenizer(config: Config) -> tokenizer:
+    vocab_path = config.path(config.vocab_path)
+    merges_path = config.path(config.merges_path)
+    if vocab_path.exists() != merges_path.exists():
+        raise FileNotFoundError("分词器文件不完整：vocab_path 和 merges_path 必须同时存在")
+    if not vocab_path.exists():
+        vocab, merges = run_train_bpe(
+            config.path(config.train_data), config.vocab_size, list(config.special_tokens)
         )
-        with open(datapath, "r", encoding="utf-8") as f:
-            text = f.read()
-        ids = tokeniz.encode(text)
-        arr = np.array(ids, dtype = np.uint16)
-        np.save(tokenpath, arr)
-    data = np.load(tokenpath, mmap_mode="r")
-    print('getdata ok')
+        for path, value in ((vocab_path, vocab), (merges_path, merges)):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("wb") as f:
+                pickle.dump(value, f)
+    result = tokenizer.from_files(vocab_path, merges_path, special_tokens=list(config.special_tokens))
+    if len(result.vocab) != config.vocab_size:
+        raise ValueError("分词器词表大小与 vocab_size 不一致，请使用匹配的分词器和 token 缓存")
+    return result
+
+
+def getdata(data_path: Path, token_path: Path, tokeniz: tokenizer, config: Config):
+    if not token_path.exists():
+        print(f"encoding {data_path} -> {token_path}")
+        with data_path.open("r", encoding="utf-8") as f:
+            ids = tokeniz.encode(f.read())
+        dtype = np.uint16 if config.vocab_size <= 65536 else np.uint32
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(token_path, np.asarray(ids, dtype=dtype))
+    data = np.load(token_path, mmap_mode="r")
+    if data.ndim != 1 or len(data) <= config.context_length:
+        raise ValueError(f"{token_path} 必须是一维 token 数组，长度必须大于 context_length")
     return data
 
-def getbatch(dataset, batch_size, context_length, device):
-    return get_batch.get_batch(dataset, batch_size, context_length, device)
+
 def get_loss(model, x, label, loss):
-    logits = model.forward(x)
-    new_log = rearrange(logits, '... context_length vocab -> (... context_length) vocab')
-    new_y   = rearrange(label, '... context_length -> (... context_length)')
-    entropy = loss.forward(new_log, new_y)
-    return entropy
+    logits = model(x)
+    return loss(logits.reshape(-1, logits.shape[-1]), label.reshape(-1))
 
 
-def train():
-    model = transformer_lm.transformer(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta, device)
-    model.to(device)
-    optimizer = adamw.adamw(model.parameters(), lr, weight_decay, betas, eps)
-    print('start train')
+@torch.no_grad()
+def evaluate(model, dataset, config: Config, device: str, loss) -> float:
+    model.eval()
+    try:
+        losses = [
+            get_loss(model, *get_batch(dataset, config.batch_size, config.context_length, device), loss).item()
+            for _ in range(config.eval_batches)
+        ]
+        return sum(losses) / len(losses)
+    finally:
+        model.train()
+
+
+def train(config: Config = CONFIG) -> Path:
+    validate_config(config)
+    random.seed(config.seed)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    device = get_device(config)
+    model, optimizer, start_step = initialize_training(config, device)
+    if start_step >= config.total_steps:
+        raise ValueError(f"checkpoint 已完成 {start_step} 步，total_steps 必须大于这个值")
+
+    tokeniz = prepare_tokenizer(config)
+    dataset = getdata(config.path(config.train_data), config.path(config.train_tokens), tokeniz, config)
+    valid_dataset = getdata(config.path(config.valid_data), config.path(config.valid_tokens), tokeniz, config)
+    run_dir = config.path(config.run_dir)
+    config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "config.json").write_text(json.dumps(config.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    print(f"device: {device}; mode: {config.init_mode}; completed steps: {start_step}")
+    print(f"checkpoints: {config.checkpoint_dir}")
+    print(f"final model: {config.final_model_path}")
+    print(f"log: {run_dir / 'train.jsonl'}")
+    model.train()
+    loss_fn = cross_entropy()
     start_time = time.perf_counter()
-    cross = cross_entropy.cross_entropy()
-    for i in range(epoch):
-        now_lr = get_lr_cosine_schedule.get_lr_cosine_schedule(i, lr, lr*0.1, epoch*0.1, epoch)
-        for group in optimizer.param_groups:
-            group["lr"] = now_lr
-        optimizer.zero_grad()
-        (x, y) = getbatch(dataset, batch_size, context_length, device)
-        entropy = get_loss(model, x, y, cross)
-        entropy.backward()
-        gradient_clipping.gradient_clipping(model.parameters(), max_norm)
-        optimizer.step()
-        if (i+1)%10==0:
-            save_checkpoint.save_checkpoint(model, optimizer, i, modelpath+str(i))
-            with torch.no_grad():
-                (vx, vy) = getbatch(valid_dataset, batch_size, context_length, device)
-                valid_entropy = get_loss(model, vx, vy, cross)
-            with open(logpath, "a", encoding="utf-8") as f:
-                f.write(f"step {i}\t loss{entropy.item()}\t valid_loss {valid_entropy.item()}\t time {time.perf_counter()-start_time}\n")
-        print(f'epoch {i} OK, loss = {entropy.item()}')
+    with (run_dir / "train.jsonl").open("a", encoding="utf-8") as log:
+        for i in range(start_step, config.total_steps):
+            now_lr = get_lr_cosine_schedule(
+                i, config.learning_rate, config.min_learning_rate,
+                config.warmup_steps, config.total_steps,
+            )
+            for group in optimizer.param_groups:
+                group["lr"] = now_lr
+            optimizer.zero_grad()
+            x, y = get_batch(dataset, config.batch_size, config.context_length, device)
+            entropy = get_loss(model, x, y, loss_fn)
+            entropy.backward()
+            gradient_clipping(model.parameters(), config.max_grad_norm)
+            optimizer.step()
+            step = i + 1
+            is_final = step == config.total_steps
+            record = {"step": step, "lr": now_lr}
+            if step % config.eval_every == 0 or is_final:
+                record["valid_loss"] = evaluate(model, valid_dataset, config, device, loss_fn)
+            if step % config.log_every == 0 or "valid_loss" in record or is_final:
+                record.update(loss=entropy.item(), elapsed_seconds=time.perf_counter() - start_time)
+                log.write(json.dumps(record) + "\n")
+                log.flush()
+                print(record)
+            if step % config.save_every == 0 or is_final:
+                checkpoint_path = config.checkpoint_dir / f"step_{step:08d}.pt"
+                torch.save({
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "iteration": i,  # 保持旧 checkpoint 的下标约定，恢复时 +1。
+                    "model_config": config.model_kwargs(),
+                    "config": config.to_dict(),
+                }, checkpoint_path)
 
-bpe(datapath, rulepath)
+    torch.save({"model": model.state_dict(), "model_config": config.model_kwargs()}, config.final_model_path)
+    print(f"train ok! model at {config.final_model_path}")
+    return config.final_model_path
 
-dataset = getdata(datapath, rulepath, tokenpath)
-valid_dataset = getdata(valid_datapath, rulepath, valid_tokenpath)
 
-train()
+if __name__ == "__main__":
+    train()

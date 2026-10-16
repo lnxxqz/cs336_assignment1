@@ -7,18 +7,20 @@ import math
 from collections.abc import Iterable
 from einops import einsum, rearrange
 
-def gradient_clipping(parameters, max_l2_norm, eps = 1e-6):
-    g = 0
-    for p in parameters:
-        if p.grad is not None:
-            g += (p.grad**2).sum()
-    g = g.sqrt()
-    if g<=max_l2_norm:
+@torch.no_grad()
+def gradient_clipping(parameters, max_l2_norm, eps=1e-6):
+    parameters = [p for p in parameters if p.grad is not None]
+    if not parameters:
         return
-    g = max_l2_norm / (g+eps)
-    for p in parameters:
-        if p.grad is not None:
-            p.grad *= g
+
+    total_norm = torch.sqrt(
+        sum(p.grad.float().square().sum() for p in parameters)
+    )
+
+    if total_norm > max_l2_norm:
+        scale = max_l2_norm / (total_norm + eps)
+        for p in parameters:
+            p.grad.mul_(scale)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:

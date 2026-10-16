@@ -10,7 +10,7 @@ from einops import einsum, rearrange
 import os
 from typing import IO, Any, BinaryIO
 import pickle
-import softmax
+from cs336_basics import softmax
 
 def decoding(model, ini_context, tokeniz, context_length, max_length, tau=1, top_p=1):
     ids = tokeniz.encode(ini_context)
